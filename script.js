@@ -13,7 +13,7 @@ function MODS(){
 
 }
 
-var serverList = [
+/* var serverList = [
 	{
 		apiKey: "AIzaSyDiJsMLlix5o9XqPW1EpeBvuA15XNjlR8M",
 		authDomain: "car-game-a86b9.firebaseapp.com",
@@ -85,41 +85,217 @@ var serverList = [
 		messagingSenderId: "1012238241918",
 		appId: "1:1012238241918:web:d4188393dcd596b6a6882f"
 	}
-];
+]; */
 
-var database, connectedN = -1, connectedS = undefined;
-for(var i = 0; i < serverList.length; i++){
-	firebase.initializeApp(serverList[i], "server" + i);
-	let li = i;
-	let la = firebase.apps[i];
-	if(i == 0){
-		try{
-			la.analytics();
-		}catch{}
+var supabaseClient = window.supabase.createClient(
+	"https://xqkrphdewigckshmfubm.supabase.co",
+	"sb_publishable_YEExFiG5un9jstTtpErwDg_cSk6U1gw"
+);
+var supabasePlayerId = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2);
+var realtimeRooms = Object.create(null);
+var supabaseReady = (async function(){
+	var result = await supabaseClient.auth.getSession();
+	if(result.error)
+		throw result.error;
+	if(!result.data.session){
+		var signIn = await supabaseClient.auth.signInAnonymously();
+		if(signIn.error)
+			throw signIn.error;
 	}
-    	let tm = setTimeout(function(){
-    	    la.delete();
-    	}, 5000);
-	la.auth().signInAnonymously().then(() => {
-		database = la.database();
-		database.ref("/testServer").once("value", function(e){
-            		clearTimeout(tm);
-			if(connectedN >= 0 && connectedN > li)
-				connectedS.delete();
-			if(connectedN < 0 || connectedN > li){
-				database = la.database();
-				connectedN = li;
-				connectedS = la;
-			}else{
-				la.delete();
-			}
-		}, function(e){
-			la.delete();
-		});
-	}, function(e){
-		la.delete();
+})();
+
+function reportSupabaseError(error){
+	console.error("Supabase error:", error);
+	if(!window.supabaseErrorShown){
+		window.supabaseErrorShown = true;
+		alert("Could not connect to the online game service. Check the Supabase setup and try again.");
+	}
+}
+
+function makePlayerSnapshot(id, data){
+	return {
+		val: function(){ return data; },
+		ref_: {path: {pieces_: [null, null, id]}}
+	};
+}
+
+function copyPlayerData(data){
+	return JSON.parse(JSON.stringify(data));
+}
+
+function notifyPlayer(room, id, data){
+	var eventName = room.knownPlayers[id] ? "child_changed" : "child_added";
+	room.knownPlayers[id] = true;
+	room.listeners[eventName].forEach(function(listener){
+		listener(makePlayerSnapshot(id, data));
 	});
 }
+
+function notifyRoomStatus(room, status){
+	room.statusListeners.forEach(function(listener){
+		listener({val: function(){ return status; }});
+	});
+}
+
+function getRealtimeRoom(code){
+	if(realtimeRooms[code])
+		return realtimeRooms[code];
+
+	var resolveReady, rejectReady, resolvePresence;
+	var room = {
+		channel: null,
+		ready: new Promise(function(resolve, reject){ resolveReady = resolve; rejectReady = reject; }),
+		presenceReady: new Promise(function(resolve){ resolvePresence = resolve; }),
+		listeners: {child_added: [], child_changed: []},
+		statusListeners: [],
+		knownPlayers: Object.create(null),
+		selfTracked: false
+	};
+	room.channel = supabaseClient.channel("race:" + code, {
+		config: {broadcast: {self: false}, presence: {key: supabasePlayerId}}
+	});
+	room.channel.on("presence", {event: "sync"}, function(){
+		var state = room.channel.presenceState();
+		Object.keys(state).forEach(function(key){
+			var presence = state[key][0];
+			if(presence && presence.data)
+				notifyPlayer(room, presence.playerId || key, presence.data);
+		});
+		resolvePresence();
+	});
+	room.channel.on("broadcast", {event: "player_state"}, function(message){
+		if(message.payload && message.payload.playerId && message.payload.data)
+			notifyPlayer(room, message.payload.playerId, message.payload.data);
+	});
+	room.channel.on("broadcast", {event: "race_status"}, function(message){
+		if(message.payload)
+			notifyRoomStatus(room, message.payload.status);
+	});
+	realtimeRooms[code] = room;
+	room.channel.subscribe(function(status){
+		if(status === "SUBSCRIBED")
+			resolveReady();
+		else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT")
+			rejectReady(new Error("Supabase Realtime channel status: " + status));
+	});
+	return room;
+}
+
+async function readSupabaseRace(code){
+	await supabaseReady;
+	var result = await supabaseClient.from("races").select("code,status,map,created_at").eq("code", code).maybeSingle();
+	if(result.error)
+		throw result.error;
+	return result.data;
+}
+
+function databaseReference(path){
+	var pieces = path.split("/").filter(Boolean);
+	var code = pieces[0];
+	var section = pieces[1] || "";
+
+	return {
+		once: function(eventName, callback){
+			return (async function(){
+				var row = await readSupabaseRace(code);
+				var value = null;
+				if(row && section === ""){
+					var room = getRealtimeRoom(code);
+					await room.ready;
+					await room.presenceReady;
+					var playersInRoom = {};
+					var presenceState = room.channel.presenceState();
+					Object.keys(presenceState).forEach(function(id){
+						var presence = presenceState[id][0];
+						if(presence && presence.data)
+							playersInRoom[presence.playerId || id] = presence.data;
+					});
+					value = {
+						status: row.status,
+						map: row.map,
+						timestamp: new Date(row.created_at).getTime(),
+						players: playersInRoom
+					};
+				}else if(row && section === "map"){
+					value = row.map;
+				}
+				callback({val: function(){ return value; }});
+			})().catch(reportSupabaseError);
+		},
+		set: function(value){
+			return (async function(){
+				await supabaseReady;
+				if(section === ""){
+					var userResult = await supabaseClient.auth.getUser();
+					if(userResult.error)
+						throw userResult.error;
+					var result = await supabaseClient.from("races").upsert({
+						code: code,
+						status: value.status,
+						map: value.map,
+						created_at: new Date(value.timestamp).toISOString(),
+						host_id: userResult.data.user.id
+					}, {onConflict: "code"});
+					if(result.error)
+						throw result.error;
+					return;
+				}
+				if(section === "status"){
+					var update = await supabaseClient.from("races").update({status: value}).eq("code", code);
+					if(update.error)
+						throw update.error;
+					var room = getRealtimeRoom(code);
+					await room.ready;
+					notifyRoomStatus(room, value);
+					await room.channel.send({type: "broadcast", event: "race_status", payload: {status: value}});
+				}
+			})().catch(reportSupabaseError);
+		},
+		on: function(eventName, callback){
+			var room = getRealtimeRoom(code);
+			if(section === "players" && (eventName === "child_added" || eventName === "child_changed")){
+				room.listeners[eventName].push(callback);
+				room.ready.catch(reportSupabaseError);
+			}else if(section === "status" && eventName === "value"){
+				room.statusListeners.push(callback);
+				readSupabaseRace(code).then(function(row){
+					if(row)
+						callback({val: function(){ return row.status; }});
+				}).catch(reportSupabaseError);
+			}
+		},
+		push: function(){
+			var playerId = supabasePlayerId;
+			var lastSentAt = 0;
+			return {
+				path: {pieces_: [null, code, playerId]},
+				set: function(data){
+					var room = getRealtimeRoom(code);
+					var playerData = copyPlayerData(data);
+					return room.ready.then(async function(){
+						if(!room.selfTracked){
+							room.selfTracked = true;
+							var trackResult = await room.channel.track({playerId: playerId, data: playerData});
+							if(trackResult !== "ok")
+								throw new Error("Could not publish player presence: " + trackResult);
+						}
+						var now = Date.now();
+						if(now - lastSentAt < 50)
+							return;
+						lastSentAt = now;
+						await room.channel.send({
+							type: "broadcast",
+							event: "player_state",
+							payload: {playerId: playerId, data: playerData}
+						});
+					}).catch(reportSupabaseError);
+				}
+			};
+		}
+	};
+}
+
+var database = {ref: databaseReference};
 
 /*var config = {
 	apiKey: "AIzaSyDiJsMLlix5o9XqPW1EpeBvuA15XNjlR8M",

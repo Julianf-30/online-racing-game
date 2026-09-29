@@ -9,7 +9,7 @@ https://jchabin.github.io/cars/
 
 Some people have been forking this repo in order to make their own instance of the website, to work around school firewalls. While I have no issue with people forking this code for any reason, these forks will fail to work online because my servers only have my jchabin.github.io domain whitelisted, and I cannot remove this whitelist without risking unauthorized and outdated versions of my game being distributed onto sketchy, ad-filled websites.
 
-If you are interested in running your own instance of this game, whether to avoid firewalls, or to expand the game, all of my servers are free instances of [Firebase Realtime Databases](https://firebase.google.com/docs/database), and you can place the `firebaseConfig` into the `serverList` in `script.js`. I also enabled anonymous authentication, which gives me slightly* more accurate user metrics.
+To run your own online instance, create a [Supabase](https://supabase.com/) project and enable anonymous sign-ins under **Authentication → Sign-in methods**. Run [`supabase/schema.sql`](supabase/schema.sql) in the Supabase SQL Editor, then use the project URL and publishable key in `script.js`. The game uses Supabase Realtime Broadcast for player movement and the `races` table for room codes, maps, and start status. Never put a secret or service-role key in the browser.
 
 Also like... this game has supported mods as part of custom maps for like, 6 years. Has anyone figured out how to use that yet? Here's a demo map that shows off some basic modding features, check it out.
 
