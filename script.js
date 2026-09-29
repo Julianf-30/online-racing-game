@@ -141,27 +141,17 @@ function getRealtimeRoom(code){
 	if(realtimeRooms[code])
 		return realtimeRooms[code];
 
-	var resolveReady, rejectReady, resolvePresence;
+	var resolveReady, rejectReady;
 	var room = {
 		channel: null,
 		ready: new Promise(function(resolve, reject){ resolveReady = resolve; rejectReady = reject; }),
-		presenceReady: new Promise(function(resolve){ resolvePresence = resolve; }),
 		listeners: {child_added: [], child_changed: []},
 		statusListeners: [],
 		knownPlayers: Object.create(null),
 		selfTracked: false
 	};
 	room.channel = supabaseClient.channel("race:" + code, {
-		config: {broadcast: {self: false}, presence: {key: supabasePlayerId}}
-	});
-	room.channel.on("presence", {event: "sync"}, function(){
-		var state = room.channel.presenceState();
-		Object.keys(state).forEach(function(key){
-			var presence = state[key][0];
-			if(presence && presence.data)
-				notifyPlayer(room, presence.playerId || key, presence.data);
-		});
-		resolvePresence();
+		config: {broadcast: {self: true}}
 	});
 	room.channel.on("broadcast", {event: "player_state"}, function(message){
 		if(message.payload && message.payload.playerId && message.payload.data)
@@ -200,21 +190,11 @@ function databaseReference(path){
 				var row = await readSupabaseRace(code);
 				var value = null;
 				if(row && section === ""){
-					var room = getRealtimeRoom(code);
-					await room.ready;
-					await room.presenceReady;
-					var playersInRoom = {};
-					var presenceState = room.channel.presenceState();
-					Object.keys(presenceState).forEach(function(id){
-						var presence = presenceState[id][0];
-						if(presence && presence.data)
-							playersInRoom[presence.playerId || id] = presence.data;
-					});
 					value = {
 						status: row.status,
 						map: row.map,
 						timestamp: new Date(row.created_at).getTime(),
-						players: playersInRoom
+						players: {}
 					};
 				}else if(row && section === "map"){
 					value = row.map;
@@ -273,12 +253,6 @@ function databaseReference(path){
 					var room = getRealtimeRoom(code);
 					var playerData = copyPlayerData(data);
 					return room.ready.then(async function(){
-						if(!room.selfTracked){
-							room.selfTracked = true;
-							var trackResult = await room.channel.track({playerId: playerId, data: playerData});
-							if(trackResult !== "ok")
-								throw new Error("Could not publish player presence: " + trackResult);
-						}
 						var now = Date.now();
 						if(now - lastSentAt < 50)
 							return;
